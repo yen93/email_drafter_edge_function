@@ -1,0 +1,181 @@
+================================================================================
+CHAT HISTORY EXPORT — 2026-11-04
+Session: Started by tweaking the MAG Gmail Assistant add-on's default prompt, then
+         pivoted into designing and scaffolding a NEW event-driven Gmail drafter
+         built on Supabase edge functions + Gmail push (Pub/Sub). This edge-function
+         project was split out of the add-on repo into its own folder
+         (email_drafter_edge_function), which this history now documents.
+================================================================================
+
+--------------------------------------------------------------------------------
+USER:
+Asked for a very minor mod to the add-on's code.gs so the compose instructions box
+has a default prompt, letting users click Generate without typing.
+
+--------------------------------------------------------------------------------
+ASSISTANT:
+In the original repo (email_drafter_gmail_plugin_v2), added
+.setValue("Reply to the last message in this thread.") to the TextInput in
+onGmailComposeOpen (code.gs line 34).
+
+--------------------------------------------------------------------------------
+USER:
+/q — is that the best default? What if it's a new email/intro, not a thread?
+
+--------------------------------------------------------------------------------
+ASSISTANT:
+Read the full code.gs. Explained: onGmailComposeOpen fires for BOTH new emails and
+replies, but the pipeline is reply-oriented (system/user prompts say "reply", thread
+context comes from a Gmail search). On a fresh compose the recipient is empty, so no
+thread is found and threadContext = "No prior thread text history found" — making a
+"reply to this thread" default contradictory/misleading for intros. Recommended a
+neutral default that works both ways, since the model already sees whether a thread
+exists.
+
+--------------------------------------------------------------------------------
+USER:
+"go with the option that works for both."
+
+--------------------------------------------------------------------------------
+ASSISTANT:
+Changed code.gs line 34 to .setValue("Draft a short email in James's style.").
+(User later committed + pushed this along with docs; confirmed via git status.)
+
+--------------------------------------------------------------------------------
+USER:
+Ran /dcp (document, no git) — in the add-on repo.
+
+--------------------------------------------------------------------------------
+ASSISTANT:
+Wrote a chat-history file, added a note to as_built.txt about the pre-filled default,
+left CLAUDE.md unchanged, confirmed .gitignore already covered the key files.
+
+--------------------------------------------------------------------------------
+USER:
+/q — so Gmail add-on apps do not appear in delegated Gmail access?
+
+--------------------------------------------------------------------------------
+ASSISTANT:
+Confirmed via the manifest that it's a standard OAuth CardService add-on. Explained
+the three "delegation" meanings: (1) Gmail mail delegation ("Grant access to your
+account") — human delegates only, add-on not listed; (2) domain-wide delegation —
+service accounts, not this; (3) OAuth third-party app access (myaccount.google.com)
+— where the add-on actually appears, governed by the scopes the user consented to
+(gmail.modify etc.). Per-user OAuth, revoke there, not in the delegation list.
+
+--------------------------------------------------------------------------------
+USER:
+So how do I make the add-on appear in delegated access — or is it impossible?
+
+--------------------------------------------------------------------------------
+ASSISTANT:
+Web-verified (Google dev forum): a Gmail Workspace Add-on cannot be used inside a
+delegated mailbox, even when both accounts have it installed — no setting enables it.
+The add-on panel binds to the logged-in account, not the viewed mailbox. Gave 3
+options: (A) each person installs it on their own account (samples come from the DB,
+so voice still mimics James, but no delegated-mailbox use); (B) sign in directly as
+James (shares credentials, loses audit trail); (C) ⭐ move drafting server-side —
+create the reply as a real Gmail DRAFT in James's mailbox, which a delegate CAN see
+and send. Recommended C since it reuses the existing n8n + OpenAI + Supabase pieces.
+
+--------------------------------------------------------------------------------
+USER:
+I already have an n8n drafter that runs every 5 min; this add-on is an alternative.
+Can I build it as a Supabase function instead? Or a webhook that fires on new email
+rather than on a schedule? (/q)
+
+--------------------------------------------------------------------------------
+ASSISTANT:
+Checked the repo and listed the Supabase project's edge functions — found ~30 active
+functions, including OAuth-callback ones (xero-oauth-callback, bing-oauth-exchange),
+so OAuth-in-a-function is a proven pattern here. Answered:
+- Q1 (Supabase function): yes, feasible and on-pattern; an edge function can read
+  Gmail + call OpenAI + create a draft, but it needs its own Gmail auth plumbing and
+  still needs a trigger.
+- Q2 (webhook on new email): the real mechanism is Gmail API push via users.watch() +
+  Google Cloud Pub/Sub → pushes to an HTTPS webhook (edge fn or n8n). Caveats: needs
+  a GCP project + Pub/Sub topic, the watch expires ≤7 days (needs daily renewal), and
+  the push carries only a historyId (then call history.list). Noted n8n/Zapier "new
+  email" triggers are polling, not true push. Also mentioned a Supabase DB Webhook on
+  INSERT as a simpler event-driven-off-caching option. Gave an effort/latency matrix.
+
+--------------------------------------------------------------------------------
+USER:
+Is Pub/Sub users.watch free?
+
+--------------------------------------------------------------------------------
+ASSISTANT:
+Effectively yes. users.watch itself is free (a Gmail API call). Pub/Sub has a 10 GiB/
+month free throughput tier; Gmail notifications are a few hundred bytes each, so even
+heavy mail volume is a tiny fraction — $0 in practice. Asterisks: Pub/Sub requires a
+GCP project with BILLING ENABLED (card on file) even within free tier; downstream edge
+function/n8n costs are separate; pricing should be double-checked on Google's page.
+
+--------------------------------------------------------------------------------
+USER:
+I want the Pub/Sub users.watch → Supabase edge fn (full consolidation). I'll retire
+the n8n 5-min drafter.
+
+--------------------------------------------------------------------------------
+ASSISTANT:
+Asked two blocking questions. User chose: (1) Gmail auth = DOMAIN-WIDE DELEGATION
+(service account impersonates james@, gmail.modify scope); (2) Draft scope = INBOX
+minus Promotions/Social/Updates/Forums. Then scaffolded the whole thing in the repo's
+supabase/ folder:
+- _shared/google-auth.ts — signs a service-account JWT (RS256 via Web Crypto),
+  exchanges for an access token impersonating GMAIL_IMPERSONATE_USER.
+- _shared/gmail.ts — history.list / messages.get / threads.get / drafts.create /
+  watch helpers + header/plainText parsers.
+- _shared/samples.ts — ports getStyleSamplesFromDB (service-role read, prefer SENT,
+  strip signature, up to 24 exemplars).
+- _shared/openai.ts — gpt-4o drafting with the same mimicry prompt.
+- _shared/mime.ts — builds the base64url RFC-822 threaded reply.
+- draft-james-reply/index.ts — Pub/Sub push handler: auth via ?token=shared secret,
+  decode notification, list new INBOX messages, filter (inbox-only, skip categories/
+  no-reply/self/already-handled), build + create a draft; idempotency via a
+  gmail_processed_messages ledger; advances a gmail_watch_state baseline.
+- renew-gmail-watch/index.ts — re-arms users.watch (daily cron), seeds baseline once.
+- migrations/0001_gmail_drafter_state.sql — gmail_watch_state + gmail_processed_messages
+  (RLS on, no policies; only service_role touches them).
+- schedule_renew_watch.sql — pg_cron daily renewal template.
+- RUNBOOK-gmail-drafter.md — full setup: GCP project/Pub/Sub, service account +
+  domain-wide delegation grant, secrets list, deploy order, push subscription URL,
+  start-watch, verify, retire n8n.
+Nothing deployed (needs the user's GCP setup + a service-account key + values back).
+Flagged that domain-wide delegation needs Workspace super-admin, offering the
+OAuth-refresh-token path as a fallback. Also fixed a runbook note: the downloaded SA
+key JSON (<proj>-<hash>.json) isn't matched by the add-on repo's .gitignore patterns,
+so it should go in secrets/ or be handed over as a value, not saved in the repo.
+
+--------------------------------------------------------------------------------
+USER:
+Transfer everything related to this new edge function to
+C:\Users\Cloverly\claude_code\email_drafter_edge_function — basically everything not
+yet pushed to GitHub.
+
+--------------------------------------------------------------------------------
+ASSISTANT:
+Checked git: the earlier add-on commit was already pushed (branch matches origin).
+The only unpushed (untracked) items were: RUNBOOK-gmail-drafter.md + supabase/ (the
+edge function) AND mag-gmail-assistant.html + 2 diagram PNGs (the iMAG page, which
+documents the ADD-ON, not the function). Flagged that "unpushed" ≠ "edge-function
+related" and asked two questions. User chose: (1) move EDGE FUNCTION ONLY; (2) MOVE
+(not copy). Moved RUNBOOK-gmail-drafter.md + supabase/ into the new folder (10 files),
+leaving the iMAG page + diagrams in the add-on repo. Added a .gitignore to the new
+folder (blocks .env, secrets/, SA key JSONs, API-key files). Filesystem-only move; no
+git actions. New folder is not yet a git repo.
+
+--------------------------------------------------------------------------------
+USER:
+Ran /dcp, targeting the new folder (C:\Users\Cloverly\claude_code\email_drafter_edge_function).
+
+--------------------------------------------------------------------------------
+ASSISTANT:
+Documented this NEW project folder: wrote this chat-history file, created as_built.txt
+and CLAUDE.md for the edge-function project, and confirmed the existing .gitignore
+covers secrets. No live secrets were pasted this session (only the non-secret
+publishable/anon Supabase key), so no redactions. No git commands run.
+
+================================================================================
+END OF EXPORT
+================================================================================

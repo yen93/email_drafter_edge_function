@@ -1,0 +1,41 @@
+# Secrets & keys — never commit
+.env
+*.env
+.env.*
+secrets/
+*.pem
+*.key
+*.p12
+*.pfx
+*service-account*.json
+*-credentials.json
+*creds*.txt
+*token*.txt
+*secret*
+OPENAI_API_KEY.txt
+*API_KEY*.txt
+# Google service-account key downloads (named <project>-<hash>.json)
+gcp-*.json
+*-sa-*.json
+# Credential files that actually sit in this repo root (uppercase/underscore
+# variants the lowercase patterns above miss — gitignore matching is case-sensitive)
+*service_account*
+service_account_json_key_*.txt
+SUPABASE_ACCESS_TOKEN.txt
+*ACCESS_TOKEN*
+*TOKEN*.txt
+*.json.key
+
+# Supabase local
+supabase/.branches/
+supabase/.temp/
+.supabase/
+
+# Dependencies / build
+node_modules/
+
+# OS / editor cruft
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

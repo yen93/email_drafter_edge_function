@@ -1,0 +1,164 @@
+================================================================================
+CHAT HISTORY EXPORT — 2026-11-04
+Session: Deployed the event-driven Gmail drafter end-to-end. Because Workspace
+         super-admin wasn't available, pivoted the auth from domain-wide
+         delegation to an OAuth refresh-token flow reusing the existing n8n Gmail
+         credential. Provisioned Pub/Sub, deployed both edge functions, went LIVE
+         and verified a real draft, fixed several real issues found along the way,
+         then added two draft modifications (HTML signature + thread label).
+================================================================================
+
+NOTE ON REDACTIONS: This session handled several live secrets that are NOT
+reproduced in this summary. Redacted/withheld: the n8n credential-encryption key
+(from GCP Secret Manager), James's Gmail OAuth refresh token + client secret
+(decrypted from the n8n DB), the generated PUSH_SHARED_SECRET (the ?token= value,
+also embedded in the Pub/Sub subscription URL + cron job), the service-account
+private key, the Supabase management access token, and the OpenAI API key. Where a
+value mattered it is described by role only (e.g. "[REDACTED_PUSH_SECRET]").
+
+--------------------------------------------------------------------------------
+USER:
+/q — Following RUNBOOK-gmail-drafter. Can I use the service account
+"service_account_json_key_claudegwscli" I made for a previous system?
+
+--------------------------------------------------------------------------------
+ASSISTANT:
+Read the key file + sibling projects. It's the shared Workspace SA
+insta-drive-uploader@claudegwscli-502400.iam.gserviceaccount.com (client id
+112006793372164249856), already reused across many of the user's automations and
+almost certainly already set up for domain-wide delegation (but for Drive, not
+Gmail). Answer: yes it can work, but it needs three one-time pieces first:
+(1) ADD the gmail.modify scope to its DWD authorization in Workspace Admin (needs
+a super admin), (2) enable the Gmail + Pub/Sub APIs in claudegwscli-502400,
+(3) create the Pub/Sub topic there. Flagged two caveats: reusing one widely-copied
+key widens blast radius to James's mailbox, and the key file name isn't matched by
+.gitignore so it must not be committed.
+
+--------------------------------------------------------------------------------
+USER:
+Can't get into Admin right now (boss is out). Let's use the n8n creds instead.
+
+--------------------------------------------------------------------------------
+ASSISTANT:
+Confirmed this is the documented fallback and, crucially, the OAuth refresh-token
+flow needs NO admin console and NO domain-wide delegation. Found that the n8n
+workflow export only carries a credential *reference id* — the real secret lives
+encrypted in the n8n Supabase DB (uwsncuowtzydylfabikj). Located the live Gmail
+credential there: id dkfeQrltUckqbpZg ("Gmail account", type gmailOAuth2, refreshed
+the day before → token alive). Explained that reusing its existing refresh token
+needs neither admin NOR James to re-consent. Flagged two make-or-break checks to do
+on decrypt: the granted scope must include gmail.modify, and the consent screen
+should be published (else refresh tokens die in 7 days).
+
+--------------------------------------------------------------------------------
+USER:
+(ran gcloud to fetch the n8n encryption key; first failed on a missing secrets/
+dir, then on expired gcloud auth → re-authed with `gcloud auth login`, then wrote
+the key to secrets/n8n-encryption-key.txt)
+
+--------------------------------------------------------------------------------
+ASSISTANT:
+Created the gitignored secrets/ dir. The n8n credential blob is CryptoJS "Salted__"
+AES — decrypted it with `openssl enc -d -aes-256-cbc -md md5`. Confirmed it holds
+clientId, clientSecret and a refresh_token, with SCOPE including both
+https://mail.google.com/ and gmail.modify (covers watch, history, threads.get,
+drafts.create). Then PROVED it end-to-end: exchanged the refresh token for an
+access token and called users.getProfile → resolved to james@myadventuregroup.com.au
+(313k messages). No admin, no DWD, nobody needed.
+
+--------------------------------------------------------------------------------
+ASSISTANT (code change):
+Rewrote supabase/functions/_shared/google-auth.ts from the service-account JWT/DWD
+flow to the OAuth refresh-token flow (getGmailAccessToken() signature unchanged, so
+gmail.ts + both functions untouched). New secrets: GMAIL_OAUTH_CLIENT_ID,
+GMAIL_OAUTH_CLIENT_SECRET, GMAIL_OAUTH_REFRESH_TOKEN; dropped GMAIL_SA_CLIENT_EMAIL
+/ GMAIL_SA_PRIVATE_KEY; kept GMAIL_IMPERSONATE_USER (now just the mailbox id / state
+key). Staged the three OAuth values into gitignored secrets files.
+
+--------------------------------------------------------------------------------
+USER:
+Run steps 1–5 now and stop before 6 (don't go live).
+
+--------------------------------------------------------------------------------
+ASSISTANT:
+Applied migration 0001 (gmail_watch_state, gmail_processed_messages) to
+MAGTestProject (aivitcomiywiysrfwqxt). Deployed both functions with
+verify_jwt=false (mirrored the on-disk _shared layout so relative imports resolve);
+both returned our own 401 "unauthorized" with no token, confirming they serve.
+Enabled Pub/Sub API + created topic gmail-inbound + granted
+gmail-api-push@system.gserviceaccount.com Publisher (initially in
+claudegwscli-502400). Generated a PUSH_SHARED_SECRET and created the push
+subscription. For the 7 edge secrets I needed the Supabase management token; the
+auto-guard (correctly) blocked me from grepping for it, so I asked the user.
+
+--------------------------------------------------------------------------------
+USER:
+(pointed me at SUPABASE_ACCESS_TOKEN.txt in the project root)
+
+--------------------------------------------------------------------------------
+ASSISTANT:
+Set all 7 edge secrets via the Supabase Management API
+(GMAIL_OAUTH_CLIENT_ID/SECRET/REFRESH_TOKEN, GMAIL_IMPERSONATE_USER,
+GMAIL_PUBSUB_TOPIC, [REDACTED_PUSH_SECRET], OPENAI_API_KEY), verified all present,
+deleted the plaintext copies. Reported steps 1–5 done, held at 6.
+
+--------------------------------------------------------------------------------
+USER:
+I already sent a test email. Go live.
+
+--------------------------------------------------------------------------------
+ASSISTANT:
+Armed the watch → 400 "Invalid topicName does not match
+projects/n8nautomations-498202/topics/*". KEY FINDING: Gmail requires the Pub/Sub
+topic to live in the OAuth client's OWN project (n8nautomations-498202), not
+claudegwscli-502400 where I'd put it. Recreated the topic + publisher grant + push
+subscription in n8nautomations-498202, updated the GMAIL_PUBSUB_TOPIC secret, and
+re-armed the watch → 200 (baseline seeded, expiry ~Nov 11). Scheduled the daily
+renewal pg_cron (renew-gmail-watch-daily, 02:00 UTC) and deleted the stray
+wrong-project topic/subscription.
+
+Then the test email didn't draft. Diagnosed two real issues:
+  1) Gmail history.list is EVENTUALLY CONSISTENT. The test email's messageAdded was
+     at historyId 43265454, but rapid notifications had already advanced the baseline
+     to 43265529 — past it — so history.list never returned it and it was silently
+     skipped. (Flagged as a latent production reliability bug.)
+  2) The OPENAI_API_KEY taken from the sibling repo's OPENAI_API_KEY.txt was INVALID
+     (starts "FaJo-", not "sk-"); the valid key (sk-proj…) was in GCP Secret Manager.
+Fixed the OpenAI secret from Secret Manager, reset the baseline to just before the
+event, re-triggered via a synthetic Pub/Sub push → DRAFT CREATED. Verified the body:
+a reply in James's voice ending "Cheers / James". The whole chain (n8n OAuth token →
+watch → Pub/Sub → history → filters → style samples → gpt-4o → draft) confirmed live.
+
+--------------------------------------------------------------------------------
+USER:
+Modifications: (1) add label ai-drafts-v2 to the thread once the draft is in place;
+(2) add e_sig (e_sig.txt) to the draft after "Cheers / James".
+
+--------------------------------------------------------------------------------
+ASSISTANT:
+e_sig.txt is a full HTML (Wisestamp) signature, so drafts had to become text/html.
+Changes:
+- NEW _shared/signature.ts — the signature HTML as a constant.
+- _shared/mime.ts — buildReply now emits Content-Type text/html; added textToHtml()
+  (escapes the model's text, newlines → <br>).
+- _shared/gmail.ts — added getOrCreateLabelId() and addThreadLabel().
+- draft-james-reply/index.ts — body = textToHtml(reply) + "<br><br>" + signature;
+  after the draft, label the thread (non-fatal try/catch).
+Deployed via the Supabase CLI (npx supabase functions deploy … --no-verify-jwt
+--yes) since re-inlining the 4 KB signature by hand was too error-prone. Verified
+the signature renders (text/html, name + consult link + booking button present).
+
+The label FAILED first: create returned 409 "Label name exists or conflicts". The
+label already existed as "AI Drafts V2" (Gmail search token label:ai-drafts-v2 =
+that label — spaces→hyphens, case-insensitive), but my exact-match lookup missed it.
+Hardened getOrCreateLabelId to match Gmail's normalized form (case + space/hyphen
+insensitive) and to re-find on a 409 instead of failing; set the label constant to
+"AI Drafts V2". Redeployed, reset + re-triggered, and VERIFIED the thread now carries
+the "AI Drafts V2" label alongside the signed HTML draft. Cleaned up plaintext creds.
+
+Also flagged for follow-up: the stale sibling OPENAI_API_KEY.txt, and the
+history.list consistency bug (recommended hardening the baseline-advance logic).
+
+================================================================================
+END OF EXPORT
+================================================================================

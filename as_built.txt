@@ -1,0 +1,146 @@
+================================================================================
+AS-BUILT — email_drafter_edge_function
+Last updated: 2026-11-04
+================================================================================
+
+PURPOSE
+- Event-driven replacement for the old n8n "every 5 minutes" drafter. When a new
+  email lands in James Castrission's inbox, Gmail push (users.watch) notifies
+  Google Cloud Pub/Sub, which pushes to a Supabase edge function. The function
+  writes a reply in James's voice (OpenAI gpt-4o, grounded in cached email
+  samples), appends James's HTML signature, leaves it as a DRAFT in his mailbox,
+  and labels the thread "AI Drafts V2". It NEVER sends. Because the output is a
+  real Gmail draft, it is visible/usable through delegated mailbox access.
+
+STATUS
+- DEPLOYED and LIVE on Supabase project MAGTestProject (ref aivitcomiywiysrfwqxt)
+  as of 2026-11-04. Both functions ACTIVE (verify_jwt=false). Watch armed, daily
+  renewal cron scheduled. Verified end-to-end (a signed draft was produced in
+  james@'s mailbox and the thread labelled).
+- NOTE: the old n8n 5-minute drafter had NOT yet been deactivated at end of
+  session — that is the one remaining cut-over step (keep the n8n *caching*
+  workflow that fills james_email_samples).
+
+AUTH (changed this session — no longer domain-wide delegation)
+- OAuth REFRESH-TOKEN flow. _shared/google-auth.ts exchanges a long-lived refresh
+  token for a 1-hour access token (grant_type=refresh_token). It acts AS james@
+  directly (Gmail calls use users/me), so NO service account and NO Workspace-Admin
+  domain-wide delegation are involved. Chosen because super-admin access to add the
+  gmail.modify DWD scope wasn't available.
+- The OAuth client + refresh token are REUSED from the n8n "Gmail account"
+  credential (n8n credential id dkfeQrltUckqbpZg, stored encrypted in the n8n
+  Supabase DB uwsncuowtzydylfabikj). The OAuth client lives in GCP project
+  n8nautomations-498202. Granted scope includes https://mail.google.com/ +
+  gmail.modify. CAVEAT: the drafter shares this exact refresh token with the n8n
+  caching workflow — if that credential is revoked/re-authed, both break (mint the
+  drafter its own refresh token from the same OAuth client when James is available).
+
+ARCHITECTURE (end to end)
+  Gmail inbox --users.watch--> Pub/Sub topic --push--> draft-james-reply (edge fn)
+     |-- history.list (what changed since last baseline)
+     |-- messages.get / threads.get (filter + thread context)
+     |-- james_email_samples (style exemplars, service-role read)
+     |-- OpenAI gpt-4o (write the reply in James's voice)
+     |-- drafts.create (text/html draft + HTML signature, placed in James's mailbox)
+     '-- threads.modify (add the "AI Drafts V2" label to the thread)
+  renew-gmail-watch (edge fn) <--daily pg_cron-- re-arms the watch (expires <=7 days)
+
+EDGE FUNCTIONS (Deno / TypeScript, under supabase/functions/; both verify_jwt=FALSE)
+- draft-james-reply/index.ts — Pub/Sub PUSH target. Auth: shared secret in the URL
+  query (?token=PUSH_SHARED_SECRET). Decodes the notification, resolves the target
+  labels (INBOX + the action labels), lists new / newly-labelled messages via
+  history.list, filters them, drafts a reply (text/html + signature), creates the
+  draft, labels the thread "AI Drafts V2".
+- renew-gmail-watch/index.ts — (re)starts users.watch over INBOX + the six action
+  labels (falls back to INBOX-only if label resolution fails); seeds the processing
+  baseline on first run only. Called daily by cron. Same ?token= auth.
+- _shared/google-auth.ts — OAuth refresh-token → access-token exchange (cached in
+  memory per warm instance). (Was domain-wide-delegation JWT; changed earlier.)
+- _shared/gmail.ts — Gmail REST helpers: history.list (listHistory takes a target-
+  label Set and reacts to messageAdded + labelAdded), messages.get, threads.get,
+  drafts.create, watch (startWatch takes a labelIds array), getOrCreateLabelId
+  (normalized/case-insensitive match + 409 fallback), addThreadLabel, listLabels,
+  resolveLabelIds (resolve Gmail `label:` tokens → real label IDs, separator-
+  insensitive); plus header()/plainText() parsers.
+- _shared/labels.ts — NEW. ACTION_LABEL_TOKENS: the six "to action" label search
+  tokens (besides INBOX) whose messages also get drafted. Source of truth mirrored
+  from other_labels_to_include.txt.
+- _shared/samples.ts — reads james_email_samples (prefer SENT, strip signature,
+  up to 24 exemplars) using the service-role key.
+- _shared/openai.ts — gpt-4o Chat Completions with the James-voice mimicry prompt.
+- _shared/mime.ts — builds the base64url RFC-822 reply. Now emits Content-Type
+  text/html; textToHtml() escapes the model's text and converts newlines to <br>.
+- _shared/signature.ts — NEW. James's HTML (Wisestamp) email signature as a
+  constant, appended after the "Cheers / James" sign-off. Source: e_sig.txt (root).
+
+FILTERING (which inbound mail gets a draft)
+- Processes INBOX PLUS six user "to action" labels (see _shared/labels.ts /
+  other_labels_to_include.txt). A message qualifies if it carries ANY target label.
+  Triggers on BOTH a new message arriving with a target label AND a target label
+  being newly applied to an existing message (history messageAdded + labelAdded —
+  e.g. a VA dragging a thread into "@ James To Action").
+- Within that scope: SKIP CATEGORY_PROMOTIONS / CATEGORY_SOCIAL / CATEGORY_UPDATES /
+  CATEGORY_FORUMS; skip no-reply/do-not-reply senders; skip mail from James himself;
+  skip a thread James already replied to or that already has a draft (existing drafts
+  are NEVER modified/deleted — the function only ever creates).
+- Only acts on activity AFTER the processing baseline, not the existing backlog
+  already sitting in those labels.
+- Edit the label set in _shared/labels.ts; EXCLUDE_CATEGORIES / the filter block in
+  draft-james-reply/index.ts.
+
+DATA STORES (migration 0001_gmail_drafter_state.sql — APPLIED to aivitcomiywiysrfwqxt)
+- public.gmail_watch_state — email_address PK, last_history_id (processing
+  position), watch_expiration, updated_at. One row (james@…) with a live baseline.
+- public.gmail_processed_messages — message_id PK, thread_id, draft_id,
+  processed_at. Idempotency ledger so Pub/Sub retries never create a 2nd draft.
+  (A row with draft_id=NULL = a message that was locked then filtered out.)
+- Both: RLS ON, NO policies — only the service_role (the edge functions) touch them.
+- Reuses the EXISTING public.james_email_samples table (read-only) for style samples.
+
+EXTERNAL INTEGRATIONS
+- Gmail API (gmail.googleapis.com) — read threads, create drafts, modify labels,
+  users.watch. Auth = OAuth refresh token for james@ (acts as users/me).
+- Google Cloud Pub/Sub — topic projects/n8nautomations-498202/topics/gmail-inbound
+  (MUST be in the OAuth client's project — Gmail rejects a topic in any other
+  project). Push subscription gmail-inbound-push → the draft-james-reply URL.
+  gmail-api-push@system.gserviceaccount.com has Pub/Sub Publisher on the topic.
+- OpenAI (api.openai.com, Chat Completions, gpt-4o) — writes the draft.
+- Supabase (PostgREST + edge runtime) — hosts the functions and state tables.
+
+SECRETS (set as Supabase edge-function secrets — NONE in the repo)
+- GMAIL_OAUTH_CLIENT_ID / GMAIL_OAUTH_CLIENT_SECRET / GMAIL_OAUTH_REFRESH_TOKEN —
+  the OAuth client + james@ refresh token (from the n8n Gmail credential).
+- GMAIL_IMPERSONATE_USER — james@myadventuregroup.com.au (now only the mailbox id /
+  gmail_watch_state key; NOT an impersonation subject anymore).
+- GMAIL_PUBSUB_TOPIC — projects/n8nautomations-498202/topics/gmail-inbound.
+- PUSH_SHARED_SECRET — the ?token= value authenticating Pub/Sub + cron calls.
+- OPENAI_API_KEY — OpenAI key. Authoritative copy is in GCP Secret Manager
+  (project claudegwscli-502400, secret OPENAI_API_KEY, sk-proj…). NOTE: the sibling
+  repo's email_drafter_gmail_plugin_v2/OPENAI_API_KEY.txt is STALE/INVALID — don't
+  use it.
+- SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY — injected automatically by Supabase.
+
+AUTOMATIONS / ROUTINES
+- renew-gmail-watch-daily — pg_cron job on aivitcomiywiysrfwqxt (02:00 UTC), POSTs
+  renew-gmail-watch?token=… via pg_net to re-arm the watch before its ≤7-day expiry.
+- draft-james-reply — not scheduled; invoked by Pub/Sub on each INBOX change.
+
+KNOWN ISSUES / FOLLOW-UPS
+- history.list EVENTUAL CONSISTENCY: the handler advances gmail_watch_state
+  .last_history_id to the notification's historyId. A messageAdded event that
+  Gmail's history API hasn't surfaced yet can be leapfrogged and SILENTLY SKIPPED
+  (observed this session). Worth hardening (advance more conservatively and/or add a
+  periodic re-scan backstop — the idempotency ledger already makes re-scans safe).
+- Old n8n 5-minute drafter still active — deactivate it to finish the cut-over.
+
+REFERENCE FILES
+- RUNBOOK-gmail-drafter.md — original DWD-based setup (the AUTH section is now
+  superseded by the OAuth refresh-token flow above; the GCP/Pub/Sub/deploy steps
+  still apply, but the topic goes in the OAuth client's project).
+- e_sig.txt — source of James's HTML signature (embedded in _shared/signature.ts).
+- other_labels_to_include.txt — the six extra "to action" labels to process beyond
+  INBOX; mirrored into _shared/labels.ts (ACTION_LABEL_TOKENS).
+- ai-email-draft-assistant.html — local iMAG-themed end-user guide for this system
+  (self-contained; diagram-flow.png / diagram-filter.png are embedded as base64 and
+  also kept alongside it). Built with the imag_page_local skill; no Drive copy.
+================================================================================
