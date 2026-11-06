@@ -87,6 +87,17 @@ renew-gmail-watch (edge fn) <--daily pg_cron-- re-arm watch over INBOX + action 
 - **Deploy with the Supabase CLI** (`npx supabase functions deploy <name>
   --project-ref aivitcomiywiysrfwqxt --no-verify-jwt --yes`) — it bundles `_shared`
   from disk, which the MCP deploy can't do cleanly for large files like the signature.
+  ⚠️ **But the CLI is BLOCKED on the current Windows machine** (2026-11-06): a Windows
+  Application Control (WDAC/AppLocker) policy refuses to run the CLI binary
+  (`@supabase/cli-windows-x64` `supabase.exe`) — "An Application Control policy has
+  blocked this file", surfacing as `spawn UNKNOWN` / errno -4094 from `npx supabase`.
+  Can't be bypassed. **Deploy via the Supabase MCP `deploy_edge_function` tool
+  instead:** call `get_edge_function` to pull the current file set + naming, then
+  redeploy the entrypoint + ALL `_shared` files in one call (MCP deploy doesn't
+  bundle from disk, so every imported file must be passed), `verify_jwt: false`,
+  file names matching the deployed form (`functions/draft-james-reply/index.ts`,
+  `functions/_shared/*.ts`). The whole function is ~31 KB (signature.ts ~6.3 KB) —
+  comfortably within MCP limits, so the "large files" caveat above doesn't bite here.
 - **Deploy both functions with `verify_jwt = false`.** They're called by Pub/Sub
   and cron, which can't present a Supabase JWT. They authenticate themselves via a
   shared secret in the URL query (`?token=PUSH_SHARED_SECRET`). Do NOT leave the
@@ -119,8 +130,11 @@ renew-gmail-watch (edge fn) <--daily pg_cron-- re-arm watch over INBOX + action 
   the watch (the daily cron does this automatically on its next run).
 - **Draft scope filter** lives in `draft-james-reply/index.ts`
   (`EXCLUDE_CATEGORIES` + the filter block): must carry a target label (INBOX or an
-  action label), skip Promotions/Social/Updates/Forums, no-reply senders, self, and
-  already-handled threads. The already-handled check (James replied OR the thread has
+  action label), skip Promotions/Social/Updates/Forums, no-reply senders, self,
+  **internal colleagues** (From contains `@myadventuregroup.com.au` —
+  `INTERNAL_SENDER_DOMAIN`, added 2026-11-06 at James's request: no auto-draft for
+  intra-MAG mail; matches the raw From header case-insensitively, so it won't catch a
+  colleague writing from a non-MAG address), and already-handled threads. The already-handled check (James replied OR the thread has
   a `DRAFT`) means **existing drafts are never modified/deleted — the function only
   ever creates**, and it only acts on activity *after* the baseline (never the
   existing backlog in those labels).

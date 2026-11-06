@@ -1,6 +1,6 @@
 ================================================================================
 AS-BUILT — email_drafter_edge_function
-Last updated: 2026-11-04
+Last updated: 2026-11-06
 ================================================================================
 
 PURPOSE
@@ -13,10 +13,12 @@ PURPOSE
   real Gmail draft, it is visible/usable through delegated mailbox access.
 
 STATUS
-- DEPLOYED and LIVE on Supabase project MAGTestProject (ref aivitcomiywiysrfwqxt)
-  as of 2026-11-04. Both functions ACTIVE (verify_jwt=false). Watch armed, daily
-  renewal cron scheduled. Verified end-to-end (a signed draft was produced in
-  james@'s mailbox and the thread labelled).
+- DEPLOYED and LIVE on Supabase project MAGTestProject (ref aivitcomiywiysrfwqxt).
+  Both functions ACTIVE (verify_jwt=false). Watch armed, daily renewal cron
+  scheduled. Verified end-to-end (a signed draft was produced in james@'s mailbox
+  and the thread labelled).
+- draft-james-reply is at VERSION 8 (deployed 2026-11-06) — adds the internal-
+  domain sender skip (see FILTERING). renew-gmail-watch unchanged.
 - NOTE: the old n8n 5-minute drafter had NOT yet been deactivated at end of
   session — that is the one remaining cut-over step (keep the n8n *caching*
   workflow that fills james_email_samples).
@@ -81,8 +83,10 @@ FILTERING (which inbound mail gets a draft)
   e.g. a VA dragging a thread into "@ James To Action").
 - Within that scope: SKIP CATEGORY_PROMOTIONS / CATEGORY_SOCIAL / CATEGORY_UPDATES /
   CATEGORY_FORUMS; skip no-reply/do-not-reply senders; skip mail from James himself;
-  skip a thread James already replied to or that already has a draft (existing drafts
-  are NEVER modified/deleted — the function only ever creates).
+  skip mail from internal colleagues (From contains "@myadventuregroup.com.au" —
+  INTERNAL_SENDER_DOMAIN, added v8 2026-11-06); skip a thread James already replied to
+  or that already has a draft (existing drafts are NEVER modified/deleted — the
+  function only ever creates).
 - Only acts on activity AFTER the processing baseline, not the existing backlog
   already sitting in those labels.
 - Edit the label set in _shared/labels.ts; EXCLUDE_CATEGORIES / the filter block in
@@ -132,6 +136,14 @@ KNOWN ISSUES / FOLLOW-UPS
   (observed this session). Worth hardening (advance more conservatively and/or add a
   periodic re-scan backstop — the idempotency ledger already makes re-scans safe).
 - Old n8n 5-minute drafter still active — deactivate it to finish the cut-over.
+- DEPLOY ON THIS MACHINE: the Supabase CLI binary (@supabase/cli-windows-x64
+  supabase.exe, spawned by `npx supabase`) is BLOCKED by a Windows Application
+  Control (WDAC/AppLocker) policy — it fails with "An Application Control policy has
+  blocked this file" (surfaces as `spawn UNKNOWN`, errno -4094). So the documented
+  CLI deploy does not work here. Deploy via the Supabase MCP deploy_edge_function
+  tool instead: pull the current file set with get_edge_function, then redeploy
+  index.ts + ALL _shared files together (the MCP deploy does not bundle from disk),
+  keeping verify_jwt=false. ~31 KB total, within MCP limits (signature.ts ~6.3 KB).
 
 REFERENCE FILES
 - RUNBOOK-gmail-drafter.md — original DWD-based setup (the AUTH section is now

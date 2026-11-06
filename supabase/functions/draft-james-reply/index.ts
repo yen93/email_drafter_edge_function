@@ -36,6 +36,10 @@ const EXCLUDE_CATEGORIES = [
   "CATEGORY_FORUMS",
 ];
 
+// Internal domain: don't draft replies to colleagues on My Adventure Group.
+// Matched against the sender's address (case-insensitive).
+const INTERNAL_SENDER_DOMAIN = "@myadventuregroup.com.au";
+
 // Label applied to every thread we draft into, so drafts are easy to find/audit.
 // (Gmail search token: label:ai-drafts-v2.) Matched case/space-insensitively.
 const DRAFT_LABEL = "AI Drafts V2";
@@ -136,6 +140,8 @@ Deno.serve(async (req) => {
         const from = header(msg, "From");
         if (/no-?reply|do-?not-?reply/i.test(from)) continue;
         if (from.toLowerCase().includes(email.toLowerCase())) continue;
+        // Skip internal colleagues (My Adventure Group) — no auto-draft for them.
+        if (from.toLowerCase().includes(INTERNAL_SENDER_DOMAIN)) continue;
 
         // Thread context + skip if James already replied or a draft exists.
         const thread = await getThread(token, threadId);

@@ -1,0 +1,82 @@
+================================================================================
+CHAT HISTORY EXPORT — 2026-11-06
+Session: Excluded internal colleagues from the live Gmail drafter. Added a
+         sender-domain skip so no AI draft is created for mail from
+         @myadventuregroup.com.au, then deployed draft-james-reply. The documented
+         Supabase CLI deploy was blocked by a Windows Application Control policy, so
+         the deploy went out via the Supabase MCP tool instead (now version 8).
+         Finished with this /dcp.
+================================================================================
+
+NOTE ON REDACTIONS: No live secrets were pasted or printed this session. The
+function's push shared secret, OAuth, and OpenAI keys were never shown — the deploy
+used the Supabase MCP tool (authenticated out-of-band), not a pasted token. Nothing
+required redaction.
+
+--------------------------------------------------------------------------------
+USER:
+"do not write drafts for all those for people with @myadventuregroup.com.au email
+add." — i.e. the drafter should stop creating AI reply drafts for internal My
+Adventure Group colleagues (the user's own domain).
+
+--------------------------------------------------------------------------------
+ASSISTANT:
+Located the per-message filter block in
+supabase/functions/draft-james-reply/index.ts (the no-reply / self checks right
+after reading the From header). Added a constant
+`INTERNAL_SENDER_DOMAIN = "@myadventuregroup.com.au"` near EXCLUDE_CATEGORIES and a
+new guard immediately after the existing self-skip:
+
+    // Skip internal colleagues (My Adventure Group) — no auto-draft for them.
+    if (from.toLowerCase().includes(INTERNAL_SENDER_DOMAIN)) continue;
+
+Match is on the raw From header (case-insensitive), so it catches both bare
+address and display-name forms containing that address; it does NOT catch a
+colleague writing from a personal/non-MAG address. Only affects activity after the
+current baseline; never touches existing drafts.
+
+Tried to deploy with the documented path
+(`npx supabase functions deploy draft-james-reply --project-ref aivitcomiywiysrfwqxt
+--no-verify-jwt --yes`). It failed under both Git Bash and PowerShell with
+`spawn UNKNOWN` (errno -4094). Traced it: the `supabase` npm wrapper spawns the
+platform binary `@supabase/cli-windows-x64/bin/supabase.exe`; running that exe
+directly returned "An Application Control policy has blocked this file" — a
+machine-level WDAC/AppLocker block on the CLI binary. Not bypassable (nor
+appropriate to bypass), so the CLI route is dead on this machine.
+
+Switched to the Supabase MCP deploy tool (mcp__..._Supabase__deploy_edge_function).
+Checked file sizes first (CLAUDE.md warns MCP deploy struggles with "large files
+like the signature" — but signature.ts is only ~6.3 KB and the whole function is
+~31 KB across 8 files, well within limits). Pulled the exact currently-deployed
+file set via get_edge_function to get authoritative content + the file-naming
+convention (entrypoint `functions/draft-james-reply/index.ts`, shared files under
+`functions/_shared/...`, matching the `../_shared/` relative imports). Deployed the
+edited index.ts plus all 7 unchanged _shared files verbatim, with verify_jwt=false
+(it must stay off — the function authenticates via the ?token= shared secret, not a
+Supabase JWT). Result: draft-james-reply is now version 8, status ACTIVE,
+verify_jwt=false on MAGTestProject (aivitcomiywiysrfwqxt).
+
+Reported the change, the CLI-block diagnosis and MCP workaround, and the match
+caveats. Left CLAUDE.md's "Draft scope filter" note untouched (it still lists only
+Promotions/Social/Updates/no-reply/self) pending /dcp; offered to also apply the
+same skip to the sibling n8n drafter.
+
+--------------------------------------------------------------------------------
+USER:
+/dcp — save the chat, update as_built.txt / CLAUDE.md / .gitignore (no git).
+
+--------------------------------------------------------------------------------
+ASSISTANT:
+Ran the four /dcp steps. Wrote this chat-history file. Updated as_built.txt (noted
+the internal-domain sender exclusion in the draft-james-reply filter and that it is
+live as version 8). Updated CLAUDE.md: added the internal-domain skip to the "Draft
+scope filter" description and added a gotcha documenting that the local Supabase CLI
+binary is blocked by Windows Application Control, so deploys on this machine go
+through the Supabase MCP deploy tool (passing index.ts + all _shared files from the
+get_edge_function dump). Confirmed .gitignore already covers both live-credential
+files in the repo root (service_account_json_key_*.txt, SUPABASE_ACCESS_TOKEN.txt).
+Did NOT run any git commands — the user commits/pushes themselves.
+
+================================================================================
+END OF EXPORT
+================================================================================
