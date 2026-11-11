@@ -172,19 +172,56 @@ export function header(msg: any, name: string): string {
   return h?.value ?? "";
 }
 
-// Flatten a message's text/plain parts into a single decoded string.
+// Flatten a message's text/plain parts into a single decoded string, falling
+// back to stripped text/html parts and finally msg.snippet so HTML-only emails
+// never produce an empty body.
 // deno-lint-ignore no-explicit-any
 export function plainText(msg: any): string {
-  const parts: string[] = [];
+  const plainParts: string[] = [];
+  const htmlParts: string[] = [];
   // deno-lint-ignore no-explicit-any
   const walk = (p: any) => {
     if (!p) return;
-    if (p.mimeType === "text/plain" && p.body?.data) parts.push(decodeB64Url(p.body.data));
+    if (p.mimeType === "text/plain" && p.body?.data) {
+      plainParts.push(decodeB64Url(p.body.data));
+    } else if (p.mimeType === "text/html" && p.body?.data) {
+      htmlParts.push(decodeB64Url(p.body.data));
+    }
     for (const c of p.parts ?? []) walk(c);
   };
   walk(msg.payload);
-  if (!parts.length && msg.payload?.body?.data) parts.push(decodeB64Url(msg.payload.body.data));
-  return parts.join("\n").trim();
+
+  const plain = plainParts.join("\n").trim();
+  if (plain) return plain;
+
+  if (!htmlParts.length && msg.payload?.body?.data) {
+    const raw = decodeB64Url(msg.payload.body.data);
+    if (msg.payload?.mimeType === "text/html") htmlParts.push(raw);
+    else if (raw.trim()) return raw.trim();
+  }
+
+  if (htmlParts.length) {
+    const stripped = htmlToPlainText(htmlParts.join("\n")).trim();
+    if (stripped) return stripped;
+  }
+
+  return (msg.snippet ?? "").trim();
+}
+
+function htmlToPlainText(html: string): string {
+  return html
+    .replace(/<style[\s\S]*?<\/style>/gi, "")
+    .replace(/<script[\s\S]*?<\/script>/gi, "")
+    .replace(/<br\s*\/?>/gi, "\n")
+    .replace(/<\/(p|div|tr|li|h[1-6]|blockquote)>/gi, "\n")
+    .replace(/<[^>]+>/g, "")
+    .replace(/&nbsp;/gi, " ")
+    .replace(/&amp;/gi, "&")
+    .replace(/&lt;/gi, "<")
+    .replace(/&gt;/gi, ">")
+    .replace(/&quot;/gi, '"')
+    .replace(/&#39;|&apos;/gi, "'")
+    .replace(/\r?\n\s*\r?\n\s*\r?\n+/g, "\n\n");
 }
 
 function decodeB64Url(data: string): string {

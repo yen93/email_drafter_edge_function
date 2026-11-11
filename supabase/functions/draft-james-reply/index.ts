@@ -132,9 +132,9 @@ Deno.serve(async (req) => {
         const labels: string[] = msg.labelIds ?? [];
 
         // Scope filter: must still carry a target label (INBOX or a "to action"
-        // label), never SENT, never a non-primary inbox category.
+        // label), never SENT or DRAFT itself, never a non-primary inbox category.
         if (!labels.some((l) => targetLabelIds.has(l))) continue;
-        if (labels.includes("SENT")) continue;
+        if (labels.includes("SENT") || labels.includes("DRAFT")) continue;
         if (EXCLUDE_CATEGORIES.some((l) => labels.includes(l))) continue;
 
         const from = header(msg, "From");
@@ -143,32 +143,44 @@ Deno.serve(async (req) => {
         // Skip internal colleagues (My Adventure Group) — no auto-draft for them.
         if (from.toLowerCase().includes(INTERNAL_SENDER_DOMAIN)) continue;
 
-        // Thread context + skip if James already replied or a draft exists.
+        // Thread context + skip only if James already SENT a reply after this message
+        // (do NOT skip just because an existing draft is present in the thread).
         const thread = await getThread(token, threadId);
         const tmsgs = thread.messages ?? [];
         // deno-lint-ignore no-explicit-any
-        const alreadyHandled = tmsgs.some((m: any) => {
+        const alreadyReplied = tmsgs.some((m: any) => {
           const f = header(m, "From").toLowerCase();
           const l: string[] = m.labelIds ?? [];
-          const jamesReplied = f.includes(email.toLowerCase()) &&
+          if (l.includes("DRAFT")) return false;
+          return f.includes(email.toLowerCase()) &&
             Number(m.internalDate) > Number(msg.internalDate);
-          return jamesReplied || l.includes("DRAFT");
         });
-        if (alreadyHandled) continue;
+        if (alreadyReplied) continue;
 
-        const context = tmsgs
+        // Exclude draft messages from the thread history fed to OpenAI so an
+        // existing draft doesn't pollute the conversation context.
+        // deno-lint-ignore no-explicit-any
+        const nonDraftMsgs = tmsgs.filter((m: any) => !(m.labelIds ?? []).includes("DRAFT"));
+        const sourceMsgs = nonDraftMsgs.length ? nonDraftMsgs : tmsgs;
+
+        const context = sourceMsgs
           .slice(-4)
           // deno-lint-ignore no-explicit-any
-          .map((m: any) => `From: ${header(m, "From")}\nBody: ${plainText(m)}`)
+          .map((m: any) =>
+            `From: ${header(m, "From")}\nTo: ${header(m, "To")}\nSubject: ${header(m, "Subject")}\nBody: ${plainText(m)}`
+          )
           .join("\n\n---\n\n");
 
+        const recipientTo = header(msg, "Reply-To") || from;
+        const subject = header(msg, "Subject");
+
         if (styleSamples === null) styleSamples = await getStyleSamples();
-        const replyBody = await draftReply(context, styleSamples);
+        const replyBody = await draftReply(context, styleSamples, recipientTo, subject);
 
         const raw = buildReply({
           from: email,
-          to: header(msg, "Reply-To") || from,
-          subject: header(msg, "Subject"),
+          to: recipientTo,
+          subject,
           inReplyTo: header(msg, "Message-ID"),
           references: `${header(msg, "References")} ${header(msg, "Message-ID")}`.trim(),
           // HTML body: the model's reply (ending "Cheers / James") + James's signature.
